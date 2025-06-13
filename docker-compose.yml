@@ -1,0 +1,347 @@
+version: '3.8'
+
+services:
+  # Core Infrastructure Services
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ate_platform
+      POSTGRES_USER: ate
+      POSTGRES_PASSWORD: ate_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - ate_network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ate_network
+
+  # Core Platform Services
+  auth-service:
+    build:
+      context: ./core/auth-service
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET_KEY: your-jwt-secret-key-change-in-production
+      FLASK_ENV: development
+    ports:
+      - "5001:5001"
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./core/auth-service:/app
+    networks:
+      - ate_network
+
+  tenant-service:
+    build:
+      context: ./core/tenant-service
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+      REDIS_URL: redis://redis:6379
+      AUTH_SERVICE_URL: http://auth-service:5001
+    ports:
+      - "5003:5003"
+    depends_on:
+      - postgres
+      - redis
+      - auth-service
+    volumes:
+      - ./core/tenant-service:/app
+    networks:
+      - ate_network
+
+  storage-service:
+    build:
+      context: ./core/storage-service
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+      STORAGE_PATH: /app/storage
+      AUTH_SERVICE_URL: http://auth-service:5001
+    ports:
+      - "5004:5004"
+    depends_on:
+      - postgres
+      - auth-service
+    volumes:
+      - ./core/storage-service:/app
+      - storage_data:/app/storage
+    networks:
+      - ate_network
+
+  # Analysis Engine Services
+  parsing-service:
+    build:
+      context: ./analysis/parsing-service
+      dockerfile: Dockerfile
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:5001
+      STORAGE_SERVICE_URL: http://storage-service:5004
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "5002:5002"
+    depends_on:
+      - redis
+      - auth-service
+      - storage-service
+    volumes:
+      - ./analysis/parsing-service:/app
+    networks:
+      - ate_network
+
+  dependency-service:
+    build:
+      context: ./analysis/dependency-service
+      dockerfile: Dockerfile
+    environment:
+      PARSING_SERVICE_URL: http://parsing-service:5002
+      AUTH_SERVICE_URL: http://auth-service:5001
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "5005:5005"
+    depends_on:
+      - redis
+      - parsing-service
+    volumes:
+      - ./analysis/dependency-service:/app
+    networks:
+      - ate_network
+
+  quality-service:
+    build:
+      context: ./analysis/quality-service
+      dockerfile: Dockerfile
+    environment:
+      PARSING_SERVICE_URL: http://parsing-service:5002
+      AUTH_SERVICE_URL: http://auth-service:5001
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "5006:5006"
+    depends_on:
+      - redis
+      - parsing-service
+    volumes:
+      - ./analysis/quality-service:/app
+    networks:
+      - ate_network
+
+  # Business Intelligence Services
+  domain-service:
+    build:
+      context: ./intelligence/domain-service
+      dockerfile: Dockerfile
+    environment:
+      PARSING_SERVICE_URL: http://parsing-service:5002
+      AUTH_SERVICE_URL: http://auth-service:5001
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+    ports:
+      - "5007:5007"
+    depends_on:
+      - postgres
+      - parsing-service
+    volumes:
+      - ./intelligence/domain-service:/app
+    networks:
+      - ate_network
+
+  process-service:
+    build:
+      context: ./intelligence/process-service
+      dockerfile: Dockerfile
+    environment:
+      DOMAIN_SERVICE_URL: http://domain-service:5007
+      PARSING_SERVICE_URL: http://parsing-service:5002
+      AUTH_SERVICE_URL: http://auth-service:5001
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+    ports:
+      - "5008:5008"
+    depends_on:
+      - postgres
+      - domain-service
+    volumes:
+      - ./intelligence/process-service:/app
+    networks:
+      - ate_network
+
+  # Opportunity Detection Services
+  opportunity-service:
+    build:
+      context: ./opportunities/opportunity-service
+      dockerfile: Dockerfile
+    environment:
+      PROCESS_SERVICE_URL: http://process-service:5008
+      DOMAIN_SERVICE_URL: http://domain-service:5007
+      QUALITY_SERVICE_URL: http://quality-service:5006
+      AUTH_SERVICE_URL: http://auth-service:5001
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+    ports:
+      - "5009:5009"
+    depends_on:
+      - postgres
+      - process-service
+      - domain-service
+      - quality-service
+    volumes:
+      - ./opportunities/opportunity-service:/app
+    networks:
+      - ate_network
+
+  business-case-service:
+    build:
+      context: ./opportunities/business-case-service
+      dockerfile: Dockerfile
+    environment:
+      OPPORTUNITY_SERVICE_URL: http://opportunity-service:5009
+      AUTH_SERVICE_URL: http://auth-service:5001
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+    ports:
+      - "5010:5010"
+    depends_on:
+      - postgres
+      - opportunity-service
+    volumes:
+      - ./opportunities/business-case-service:/app
+    networks:
+      - ate_network
+
+  # Architecture Design Services
+  architecture-service:
+    build:
+      context: ./architecture/architecture-service
+      dockerfile: Dockerfile
+    environment:
+      OPPORTUNITY_SERVICE_URL: http://opportunity-service:5009
+      BUSINESS_CASE_SERVICE_URL: http://business-case-service:5010
+      AUTH_SERVICE_URL: http://auth-service:5001
+      DATABASE_URL: postgresql://ate:ate_password@postgres:5432/ate_platform
+    ports:
+      - "5011:5011"
+    depends_on:
+      - postgres
+      - opportunity-service
+      - business-case-service
+    volumes:
+      - ./architecture/architecture-service:/app
+    networks:
+      - ate_network
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:5001
+      PARSING_SERVICE_URL: http://parsing-service:5002
+      OPPORTUNITY_SERVICE_URL: http://opportunity-service:5009
+      ARCHITECTURE_SERVICE_URL: http://architecture-service:5011
+    ports:
+      - "8000:8000"
+    depends_on:
+      - auth-service
+      - parsing-service
+      - opportunity-service
+      - architecture-service
+    volumes:
+      - ./api-gateway:/app
+    networks:
+      - ate_network
+
+  # Frontend Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - ate_network
+
+  # Monitoring and Observability
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    networks:
+      - ate_network
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - ate_network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - ate_network
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.8.0
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+    networks:
+      - ate_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  storage_data:
+  prometheus_data:
+  grafana_data:
+  elasticsearch_data:
+
+networks:
+  ate_network:
+    driver: bridge
+
